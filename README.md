@@ -12,8 +12,6 @@
 | Chassis | Base structure for mounting components | 1 |
 | Li-ion Battery Pack (7.4V–11.1V) | Powers the motors and ESP32-CAM | 1 |
 | Voltage Regulator (AMS1117 5V) | Provides stable 5V for ESP32-CAM | 1 |
-| Power Switch | On/off control | 1 |
-| Track Surface | Black line on a white background for the robot to follow | — |
 
 ---
 
