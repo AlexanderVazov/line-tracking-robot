@@ -1,11 +1,4 @@
-# ESP32-CAM Line-Tracking Robot
-
-## Project Overview
-This project implements a **line-tracking robot** using an **ESP32-CAM** module.  
-The robot is capable of following a line on the ground using **real-time image processing** from the onboard camera. Motor control is handled by an **L298N motor driver**, and the system continuously adjusts its direction based on the position of the line.  
-
-This project combines **embedded systems programming, real-time control, and basic computer vision** to create a fully functional autonomous robot suitable for educational purposes.
-
+# ESP32-CAM Line-Following Robot
 ---
 
 ## Hardware Components
