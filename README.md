@@ -1,4 +1,7 @@
 # ESP32-CAM Line-Following Robot
+## Work Principle
+The robot works by using a live camera feed, looking ahead of the robot, which looks for a black line on the ground in order to follow it. The camera captures images of the "track" and adjusts the input for both of the 2 DC motors (1 per wheel) accordingly so the robot doesn't swerve too far off the track/line.
+
 ---
 
 ## Hardware Components
@@ -11,7 +14,7 @@
 | DC Motors with Wheels | Drive system for movement | 2 |
 | Chassis | Base structure for mounting components | 1 |
 | Li-ion Battery Pack (7.4V–11.1V) | Powers the motors and ESP32-CAM | 1 |
-| Voltage Regulator (AMS1117 5V) | Provides stable 5V for ESP32-CAM | 1 |
+| Voltage Regulator (e.g. AMS1117 5V) | Provides stable 5V for ESP32-CAM | 1 |
 
 ---
 
