@@ -4,7 +4,7 @@ The robot works by using a live camera feed, looking ahead of the robot, which l
 
 ---
 
-## Hardware Components
+## Hardware Components (Provisionary)
 
 | Component | Description | Quantity |
 |-----------|-------------|----------|
