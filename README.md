@@ -14,7 +14,9 @@ The robot works by using a live camera feed, looking ahead of the robot, which l
 | DC Motors with Wheels | Drive system for movement | 2 |
 | Chassis | Base structure for mounting components | 1 |
 | Li-ion Battery Pack (7.4V–11.1V) | Powers the motors and ESP32-CAM | 1 |
-| Voltage Regulator (e.g. AMS1117 5V) | Provides stable 5V for ESP32-CAM | 1 |
+| L7805 Voltage Regulator | Provides stable 5V for ESP32-CAM | 1 |
+| 220µF Electrolytic Capacitor | Input filter capacitor before L7805 | 1 |
+| 220µF Metalized Polyester Axial Capacitor | Output filter capacitor after L7805 | 1 |
 
 ---
 
