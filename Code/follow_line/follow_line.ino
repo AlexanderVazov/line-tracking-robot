@@ -36,8 +36,8 @@
 #include <WebServer.h>
 
 // ── WiFi ──────────────────────────────────────────────────────────────────────
-#define WIFI_SSID  "Nothing Phone (2)"
-#define WIFI_PASS  "YOUR_WIFI_PASSWORD"
+#define WIFI_SSID  "SSID"
+#define WIFI_PASS  "PASSWORD"
 
 // ── Camera pin map (AI-Thinker) ───────────────────────────────────────────────
 #define PWDN_GPIO_NUM   32
@@ -84,22 +84,35 @@
 #define CONTRAST_THRESHOLD  40
 #define MIN_BACKGROUND     100   // avg pixel brightness required — rejects wood floor
 
-// ── Proportional control ──────────────────────────────────────────────────────
-// correction = adjErr × KP.  Wheels diverge gradually — no abrupt speed steps.
-#define ZONE_CENTER   30   // for web status display only
-#define ZONE_FAR      55   // for web status display only
+// ── Zone-based control ────────────────────────────────────────────────────────
+#define ZONE_CENTER   30   // wider dead-band reduces oscillation from camera swing
+#define ZONE_FAR      55
 
-#define BASE_SPEED    80   // lower speed → less ground per frame → less oscillation
-#define KP_NUM        3    // correction = adjErr * KP_NUM / KP_DEN
-#define KP_DEN        2    // → KP = 1.5  (full pivot when error reaches ~53 px)
+#define BASE_SPEED    110
+#define INNER_SLOW     25
+#define INNER_REVERSE -50
 
-#define FORWARD_MS      20   // re-evaluate interval
-#define SHARP_STOP_MS   60   // pause before a full pivot to shed momentum
+#define FORWARD_MS    25
+#define TURN_SHORT_MS 25
+#define TURN_LONG_MS  35   // shorter — prevents camera swing overshooting the line
 #define LOST_TIMEOUT_MS 800
+
+// ── Recent memory (line recovery) ─────────────────────────────────────────────
+// Recent error samples are kept while the line is visible. When it disappears
+// we look at this history to decide which way the line was heading and use
+// that as the search direction — instead of just the last single frame.
+#define MEM_SAMPLES   16   // ~half-second of history at typical frame rate
+
+// ── Static-friction kick ─────────────────────────────────────────────────────
+// Low PWM (e.g. INNER_SLOW=25) doesn't break static friction from a dead stop —
+// the motors just buzz. On any 0 → nonzero transition we hold KICK_SPEED for
+// KICK_MS to spin the wheels up, then settle to the commanded speed.
+#define KICK_SPEED 220
+#define KICK_MS    80
 
 // Camera is 15 cm ahead of the wheel axles.  On a curve the apparent pixel error
 // overstates the correction the axles actually need, causing oscillation.
-// Scale the error down before control to compensate.
+// Scale the error down before zone decisions to compensate.
 #define CAM_SCALE_NUM  2
 #define CAM_SCALE_DEN  3
 
@@ -120,20 +133,43 @@ static int  errBuf[ERR_SAMPLES] = {};
 static int  errIdx  = 0;
 static bool errFull = false;
 
+// Recent-memory buffer — fills while the line is found, frozen while lost
+static int  memBuf[MEM_SAMPLES] = {};
+static int  memIdx         = 0;
+static int  memCount       = 0;
+static int  memErrorAtLoss = 0;   // captured the moment the line disappeared
+
 static WebServer server(80);
 
 // ── Motors ────────────────────────────────────────────────────────────────────
 
+// Last commanded speed per wheel — used to detect 0 → nonzero transitions
+// so the static-friction kick fires at the right moment.
+static int lastLeftSpeed  = 0;
+static int lastRightSpeed = 0;
+
 void driveLeft(int speed) {
-    if (speed >= 0) { digitalWrite(IN1_PIN, LOW);  digitalWrite(IN2_PIN, HIGH); }
-    else            { digitalWrite(IN1_PIN, HIGH); digitalWrite(IN2_PIN, LOW);  speed = -speed; }
-    ledcWrite(ENA_PIN, constrain(speed, 0, 255));
+    bool kick = (speed != 0) && (lastLeftSpeed == 0);
+    if (speed >= 0) { digitalWrite(IN1_PIN, HIGH); digitalWrite(IN2_PIN, LOW);  }
+    else            { digitalWrite(IN1_PIN, LOW);  digitalWrite(IN2_PIN, HIGH); }
+    if (kick) {
+        ledcWrite(ENA_PIN, KICK_SPEED);
+        delay(KICK_MS);
+    }
+    ledcWrite(ENA_PIN, constrain(abs(speed), 0, 255));
+    lastLeftSpeed = speed;
 }
 
 void driveRight(int speed) {
-    if (speed >= 0) { digitalWrite(IN3_PIN, LOW);  digitalWrite(IN4_PIN, HIGH); }
-    else            { digitalWrite(IN3_PIN, HIGH); digitalWrite(IN4_PIN, LOW);  speed = -speed; }
-    ledcWrite(ENB_PIN, constrain(speed, 0, 255));
+    bool kick = (speed != 0) && (lastRightSpeed == 0);
+    if (speed >= 0) { digitalWrite(IN3_PIN, HIGH); digitalWrite(IN4_PIN, LOW);  }
+    else            { digitalWrite(IN3_PIN, LOW);  digitalWrite(IN4_PIN, HIGH); }
+    if (kick) {
+        ledcWrite(ENB_PIN, KICK_SPEED);
+        delay(KICK_MS);
+    }
+    ledcWrite(ENB_PIN, constrain(abs(speed), 0, 255));
+    lastRightSpeed = speed;
 }
 
 void stopMotors() {
@@ -141,6 +177,8 @@ void stopMotors() {
     digitalWrite(IN3_PIN, LOW); digitalWrite(IN4_PIN, LOW);
     ledcWrite(ENA_PIN, 0);
     ledcWrite(ENB_PIN, 0);
+    lastLeftSpeed  = 0;
+    lastRightSpeed = 0;
 }
 
 void setupMotors() {
@@ -206,7 +244,7 @@ bool setupCamera() {
     s->set_brightness(s, 0);
     s->set_exposure_ctrl(s, 1);
     s->set_vflip(s, 1);
-    s->set_hmirror(s, 1);
+    s->set_hmirror(s, 0);
 
     Serial.println("Camera OK");
     return true;
@@ -470,6 +508,20 @@ void setup() {
     delay(1000);
 }
 
+// Weighted average of the recent-memory buffer — newer samples count more.
+// Captures the direction the line was heading just before it disappeared.
+int recoveryError() {
+    if (memCount == 0) return lastError;
+    long sum = 0, weights = 0;
+    for (int i = 0; i < memCount; i++) {
+        int idx = (memIdx - 1 - i + MEM_SAMPLES) % MEM_SAMPLES;
+        int w   = memCount - i;   // newest sample gets the largest weight
+        sum     += (long)memBuf[idx] * w;
+        weights += w;
+    }
+    return (int)(sum / weights);
+}
+
 void loop() {
     if (!cameraReady) { server.handleClient(); delay(100); return; }
 
@@ -490,14 +542,19 @@ void loop() {
         if (!lineLost) {
             lineLost = true; lostAt = millis();
             errFull = false; errIdx = 0; memset(errBuf, 0, sizeof(errBuf));
+            // Snapshot the recovery direction. memBuf itself is NOT cleared —
+            // it stays frozen at the values seen just before the line vanished.
+            memErrorAtLoss = recoveryError();
         }
 
         if (millis() - lostAt > LOST_TIMEOUT_MS) {
             stopMotors();
         } else {
-            int t = BASE_SPEED / 2;
-            if (lastError >= 0) { driveLeft(t);  driveRight(-t); }
-            else                { driveLeft(-t); driveRight(t);  }
+            // Pivot in place at full speed toward where memory says the line
+            // was heading. Direction matches this codebase's existing convention.
+            int t = BASE_SPEED;
+            if (memErrorAtLoss >= 0) { driveLeft(t);  driveRight(-t); }
+            else                     { driveLeft(-t); driveRight(t);  }
         }
         if (serverReady) server.handleClient();
         delay(20);
@@ -511,6 +568,11 @@ void loop() {
     int error = (IMG_WIDTH / 2) - lineX;
     lastError = error;
 
+    // Push into recovery memory — used to bias direction if the line is lost
+    memBuf[memIdx] = error;
+    memIdx = (memIdx + 1) % MEM_SAMPLES;
+    if (memCount < MEM_SAMPLES) memCount++;
+
     // Rolling average over last ERR_SAMPLES frames
     errBuf[errIdx] = error;
     errIdx = (errIdx + 1) % ERR_SAMPLES;
@@ -522,18 +584,31 @@ void loop() {
 
     // Scale smoothed error to compensate for camera being 15 cm ahead of axles
     int adjErr = smooth * CAM_SCALE_NUM / CAM_SCALE_DEN;
+    int absAdj = abs(adjErr);
 
-    // Proportional correction — scales smoothly from 0 (on-centre) to BASE_SPEED (full pivot)
-    // adjErr > 0 → line left → slow left wheel, speed right wheel
-    int correction = constrain(adjErr * KP_NUM / KP_DEN, -BASE_SPEED, BASE_SPEED);
+    if (absAdj <= ZONE_CENTER) {
+        driveLeft(BASE_SPEED);
+        driveRight(BASE_SPEED);
+        driveFor(FORWARD_MS);
 
-    // Stop briefly before a full pivot so forward momentum doesn't carry past the turn
-    if (abs(correction) >= BASE_SPEED) {
-        stopMotors();
-        driveFor(SHARP_STOP_MS);
+    } else if (adjErr > 0) {
+        // Line is left of centre → turn left
+        if (absAdj <= ZONE_FAR) {
+            driveLeft(INNER_SLOW); driveRight(BASE_SPEED);
+            driveFor(TURN_SHORT_MS);
+        } else {
+            driveLeft(INNER_REVERSE); driveRight(BASE_SPEED);
+            driveFor(TURN_LONG_MS);
+        }
+
+    } else {
+        // Line is right of centre → turn right
+        if (absAdj <= ZONE_FAR) {
+            driveLeft(BASE_SPEED); driveRight(INNER_SLOW);
+            driveFor(TURN_SHORT_MS);
+        } else {
+            driveLeft(BASE_SPEED); driveRight(INNER_REVERSE);
+            driveFor(TURN_LONG_MS);
+        }
     }
-
-    driveLeft (constrain(BASE_SPEED - correction, 0, 255));
-    driveRight(constrain(BASE_SPEED + correction, 0, 255));
-    driveFor(FORWARD_MS);
 }
